@@ -237,10 +237,12 @@ abstract class KafkaOpsScenarios {
         kafka.send(dlq, "c", "{}", "kafka_dlt-original-topic", dlq);                    // loop into a DLQ
         kafka.send(dlq, "d", "{}", "kafka_dlt-original-topic", orders + "-missing");    // does not exist
         kafka.send(dlq, "e", "{}", "kafka_dlt-original-topic", "__consumer_offsets");   // internal
-        kafka.send(dlq, "f", "{}", "kafka_dlt-original-topic", orders);                 // fine
+        kafka.send(dlq, "f", "{}", "kafka_dlt-original-topic", orders);                 // fine (Spring Kafka)
+        kafka.send(dlq, "g", "{}", "__connect.errors.topic", orders);                   // fine (Kafka Connect)
 
-        Results.DryRun plan = ops.tools.replayDlqDryRun(null, dlq, 0, 0, 5, null);
-        assertThat(plan.plan().replayable()).isEqualTo(1);
+        Results.DryRun plan = ops.tools.replayDlqDryRun(null, dlq, 0, 0, 6, null);
+        assertThat(plan.plan().replayable()).isEqualTo(2);
+        assertThat(plan.plan().countsByTarget()).containsExactly(java.util.Map.entry(orders, 2));
         assertThat(plan.plan().skipped()).extracting(s -> s.offset() + ":" + s.reason()).containsExactly(
                 "0:no original-topic header and no target_topic given",
                 "1:target topic is not on the allowlist",

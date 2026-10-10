@@ -62,7 +62,7 @@ public class KafkaOpsProperties {
         private int maxMessages = 100;
         /** Headers checked, in order, for the topic a dead-lettered record originally came from. */
         private List<String> originalTopicHeaders = new ArrayList<>(
-                List.of("kafka_dlt-original-topic", "dlq-original-topic", "x-original-topic"));
+                List.of("kafka_dlt-original-topic", "__connect.errors.topic", "dlq-original-topic", "x-original-topic"));
         /** Header prefixes stripped when replaying (error details added by the DLQ writer). */
         private List<String> stripHeaderPrefixes = new ArrayList<>(List.of("kafka_dlt-", "dlq-", "__connect.errors."));
         /** Maximum unused approval tokens held at once. */
