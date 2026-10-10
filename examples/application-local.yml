@@ -1,0 +1,34 @@
+# Example config for a local cluster. Run with:
+#   java -jar target/kafka-ops-mcp-0.1.0-SNAPSHOT.jar --spring.config.additional-location=examples/application-local.yml
+kafka-ops:
+  bootstrap-servers: localhost:9092
+  principal: oncall-agent            # recorded in the audit log and bound to approval tokens
+
+  # Read-only. Add dlq:replay only on an instance meant to write.
+  scopes: [topics:read, groups:read, dlq:read]
+
+  # Nothing is visible until it matches here. Internal topics (__*) are always denied.
+  topic-allowlist:
+    - "orders.*"
+    - "payments.refunds*"
+
+  dlq-topic-patterns: ["*.DLT", "*-dlq"]
+
+  browse:
+    max-messages: 50
+  replay:
+    token-ttl: 5m
+    max-messages: 100
+  redaction:
+    max-payload-chars: 4000
+    # Add your own field names on top of the defaults by repeating the full list, e.g.:
+    # field-patterns: [password, "*token*", "*cardnumber*", email, merchantSecret]
+
+  # Optional Kafka client security, passed through as-is:
+  # client:
+  #   security.protocol: SASL_SSL
+  #   sasl.mechanism: SCRAM-SHA-512
+  #   sasl.jaas.config: ${KAFKA_JAAS_CONFIG}
+
+  # Opt-in: put redacted tool arguments on execute_tool spans.
+  capture-tool-arguments: false

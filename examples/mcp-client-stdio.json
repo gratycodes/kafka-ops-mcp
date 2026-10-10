@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "kafka-ops": {
+      "command": "java",
+      "args": [
+        "-jar", "/absolute/path/to/kafka-ops-mcp-0.1.0-SNAPSHOT.jar",
+        "--spring.profiles.active=stdio",
+        "--kafka-ops.topic-allowlist=orders.*"
+      ],
+      "env": {
+        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
+        "KAFKA_OPS_PRINCIPAL": "claude-desktop-local",
+        "KAFKA_OPS_AUDIT_FILE": "/absolute/path/to/kafka-ops-audit.jsonl"
+      }
+    }
+  }
+}
