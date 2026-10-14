@@ -1,27 +1,46 @@
 # kafka-ops-mcp
 
-An MCP server that lets an AI agent inspect Kafka and work through a dead-letter queue without being able to
-damage anything by accident. It is read-only by default. The one write it supports, replaying DLQ records, needs
-a dry run, a plan a human can review, and a short-lived single-use approval token.
+**Let an AI agent triage your Kafka dead-letter queue, without letting it break anything.**
 
-Java 21, Spring Boot 4, Spring AI MCP server (official MCP Java SDK underneath), Apache Kafka clients 4.2.
+A safe-by-default [MCP](https://modelcontextprotocol.io) server for Apache Kafka. Agents get six narrow tools: list and describe topics, check consumer lag, browse a DLQ with secrets and PII redacted, and plan a replay. The one write, replaying DLQ records, only runs from a dry-run plan a human has reviewed, using a short-lived single-use approval token.
 
-## The problem
+Java 21 · Spring Boot 4 · Spring AI MCP server (official MCP Java SDK) · Kafka clients 4.2 · OpenTelemetry · MIT
 
-When a consumer fails, the record usually ends up in a dead-letter topic: Spring Kafka's
-`DeadLetterPublishingRecoverer` writes to `<topic>.DLT`, Kafka Connect writes to whatever
-`errors.deadletterqueue.topic.name` says. Apache Kafka itself has no command to look inside that topic, filter
-it, or send records back once the bug is fixed. Teams end up with `kafka-console-consumer` one-liners and ad hoc
-replay scripts that someone runs against production by hand.
+![Demo: an MCP client browses orders.DLT (redacted, injection flagged), dry-runs a replay, a human approves, the single-use token replays 3 records, reuse is denied, and the audit log shows it all](docs/demo.gif)
 
-An AI agent is good at the reading part: "why are these 40 orders in the DLQ, and which ones are safe to retry?".
-But a lot of Kafka MCP servers hand the agent the whole cluster: produce, delete topics, reset offsets, often with
-no auth on the HTTP endpoint. A DLQ also holds exactly the data you least want in a model's context: customer
-fields, tokens in headers, and free text written by whoever produced the record, which may include instructions
-aimed at the agent.
+*Real run: a scripted MCP client over stdio against local Kafka 4.1 (KRaft) with synthetic records.*
 
-This server is narrow on purpose. Six tools, scoped, allowlisted, audited, with redaction in front of every byte
-that leaves the process.
+## Why I built it
+
+Every payments team I have worked on has had the same 2 a.m. problem: a consumer fails, records pile up in `orders.DLT`, and someone pipes `kafka-console-consumer` into grep and then runs a hand-written replay script against production. An AI agent is genuinely good at the reading part ("why are these 40 orders here, and which are safe to retry?"). But most Kafka MCP servers give the agent the whole cluster, and a DLQ holds exactly what you least want in a model's context: card data, tokens in headers, and free text that may contain instructions aimed at the agent.
+
+So this server is narrow on purpose: scoped, allowlisted, audited, and redacted before any byte leaves the process.
+
+## Quickstart
+
+Requires JDK 21 and a Kafka broker on `localhost:9092`. This is the setup used to record the demo above.
+
+```bash
+# 1. Local single-node Kafka in KRaft mode (Apache Kafka binary; any 3.x/4.x broker works)
+curl -LO https://archive.apache.org/dist/kafka/4.1.0/kafka_2.13-4.1.0.tgz
+tar xzf kafka_2.13-4.1.0.tgz && cd kafka_2.13-4.1.0
+bin/kafka-storage.sh format --standalone -t "$(bin/kafka-storage.sh random-uuid)" -c config/server.properties
+bin/kafka-server-start.sh -daemon config/server.properties
+cd ..
+# (or, with Docker: docker run -d -p 9092:9092 apache/kafka:4.2.1)
+
+# 2. Build (also runs the unit and embedded-Kafka tests)
+git clone https://github.com/Gratycodes/kafka-ops-mcp && cd kafka-ops-mcp
+mvn -B package
+
+# 3. Run over stdio (Claude Desktop, Cursor). Read-only; only orders* topics visible.
+java -jar target/kafka-ops-mcp-0.1.0-SNAPSHOT.jar --spring.profiles.active=stdio \
+  --kafka-ops.bootstrap-servers=localhost:9092 --kafka-ops.topic-allowlist='orders*'
+```
+
+Add it to your MCP client with [`examples/mcp-client-stdio.json`](examples/mcp-client-stdio.json) (set the absolute jar path), then ask: *"What's in orders.DLT, and which records are safe to replay?"*
+
+To enable replays, add the write scope: `--kafka-ops.scopes=topics:read,groups:read,dlq:read,dlq:replay` (or see [`examples/application-local.yml`](examples/application-local.yml)). For Streamable HTTP with bearer auth, see [Run it](#run-it).
 
 ## Tools
 
@@ -29,15 +48,14 @@ that leaves the process.
 | --- | --- | --- |
 | `list_topics` | `topics:read` | Allowed topics with partitions and replication factor. Others are counted, not named. |
 | `describe_topic` | `topics:read` | Partitions, leader, replicas, ISR, earliest/latest offsets, key configs. |
-| `consumer_group_lag` | `groups:read` | Group state, members, lag per partition. Partitions of non-allowed topics are hidden. |
-| `browse_dlq` | `dlq:read` | Read recent records or from an offset, with filters. Redacted, flagged, never commits. |
-| `replay_dlq_dry_run` | `dlq:read` | Builds a replay plan and, if writes are enabled, returns an approval token. Writes nothing. |
-| `replay_dlq` | `dlq:replay` | Executes a plan. Takes only the approval token, nothing else. |
+| `consumer_group_lag` | `groups:read` | Group state, members, lag per partition. Non-allowed partitions hidden. |
+| `browse_dlq` | `dlq:read` | Recent records or from an offset, with filters. Redacted, injection-flagged, never commits. |
+| `replay_dlq_dry_run` | `dlq:read` | Builds a replay plan and (if writes are enabled) returns an approval token. Writes nothing. |
+| `replay_dlq` | `dlq:replay` | Executes a plan. Accepts only the approval token. |
 
-All read tools carry `readOnlyHint=true`; `replay_dlq` carries `destructiveHint=true` so MCP clients that ask the
-user before destructive calls will do so.
+Read tools carry `readOnlyHint=true`; `replay_dlq` carries `destructiveHint=true`, so clients that confirm destructive calls will ask the user.
 
-## Design
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -53,10 +71,6 @@ flowchart LR
     end
     Gateway --> Kafka[("Kafka")]
 ```
-
-Every tool call takes the same path through `ToolRunner`, so a new tool cannot skip its scope check, its span or
-its audit line. Kafka and policy logic live in `KafkaOpsService`, which has no MCP dependency and is tested
-directly.
 
 ### Replay flow
 
@@ -82,6 +96,17 @@ sequenceDiagram
         S-->>A: replayed 41
     end
 ```
+
+## Design decisions
+
+- **One choke point for every tool.** All calls go through `ToolRunner`, so a new tool cannot skip its scope check, trace span or audit line. Kafka and policy logic live in `KafkaOpsService`, which has no MCP dependency and is tested directly.
+- **Deny by default.** The topic allowlist starts empty; internal topics are denied even under `*`; DLQ tools also require a DLQ name pattern, so a broad allowlist does not turn into "browse any business topic".
+- **The token is the only argument to the write.** Offsets and targets are frozen at dry-run time, so nothing can change between human review and execution. Only the token's SHA-256 is stored; it expires, works once and is bound to the principal.
+- **Fingerprint, then re-check.** Records are re-read and compared at execution; if anything changed or aged out, nothing is written. The DLQ itself is never modified.
+- **Write-ahead audit.** If the `ATTEMPT` line cannot be written, the replay does not run.
+- **Untrusted content is structural, not heuristic.** Record content comes back as data with `contentTrust: "untrusted"`; no tool interprets it. Injection flags are a hint, not the guarantee.
+- **Redact before filter.** `browse_dlq` filters run on redacted text, so a filter cannot be used to probe for secrets.
+- **Observability without lock-in.** Spans follow the OpenTelemetry GenAI semantic conventions and depend only on the OTel API, so they are no-ops until you attach an SDK or agent.
 
 ## Safety model
 
